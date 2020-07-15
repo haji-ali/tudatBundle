@@ -14,8 +14,8 @@ parallel=True
 def pmap(fn, runs):
     runs = [[len(runs), i] + r for i, r in enumerate(runs)]
     if parallel:
-        with Pool(len(runs), initializer=tqdm.set_lock, initargs=(tqdm.get_lock(),)) as p:
-            return p.map(fn, runs)
+        with Pool() as p:
+            return list(tqdm.tqdm(p.imap(fn, runs), total=len(runs)))
     return list(map(fn, runs))
 
 __lib__ = npct.load_library("../lib/libSatellitePropagator.so",
@@ -173,29 +173,25 @@ def shortestDist(S1, S2):
     return np.sqrt(np.sum(dP**2, axis=-1))   # return the closest distance
 
 
-def mlmc_l(data, L, M, M0):
-    totalM = 0
+def mlmc_l(data, L, M0):
     prob = 0
     sums = np.zeros((L, 4))
-    for i in trange(0, int(np.ceil(M/M0))):
-        init1 = np.random.multivariate_normal(data.mean1, data.C1, size=M0)
-        init2 = np.random.multivariate_normal(data.mean2, data.C2, size=M0)
-        c = None
-        for ell in range(0, L):
-            N = 2**ell
-            res1 = getOrbit(init1, data.T, N)
-            res2 = getOrbit(init2, data.T, N)
-            dist = linDist(res1[:, :, :3], res2[:, :, :3])  # Should be NxM
-            f = (np.sum(dist < data.radius, axis=0)>0).astype(np.float)
-            sums[ell, 0] += np.sum(f, axis=0)
-            sums[ell, 1] += np.sum(f**2, axis=0)
-            if c is not None:
-                sums[ell, 2] += np.sum(f-c, axis=0)
-                sums[ell, 3] += np.sum((f-c)**2, axis=0)
-                
-            c = f
-        totalM += M0
-    return sums, totalM
+    init1 = np.random.multivariate_normal(data.mean1, data.C1, size=M0)
+    init2 = np.random.multivariate_normal(data.mean2, data.C2, size=M0)
+    c = None
+    for ell in range(0, L):
+        N = 2**ell
+        res1 = getOrbit(init1, data.T, N)
+        res2 = getOrbit(init2, data.T, N)
+        dist = linDist(res1[:, :, :3], res2[:, :, :3])
+        f = (np.sum(dist < data.radius, axis=0)>0).astype(np.float)
+        sums[ell, 0] += np.sum(f, axis=0)
+        sums[ell, 1] += np.sum(f**2, axis=0)
+        if c is not None:
+            sums[ell, 2] += np.sum(f-c, axis=0)
+            sums[ell, 3] += np.sum((f-c)**2, axis=0)
+        c = f
+    return sums, M0
 
 def _do_mlmc_l(args):
     M,m,data,L,M0 = args
