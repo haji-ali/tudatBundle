@@ -172,6 +172,11 @@ endif( )
 include(tudatLinkLibraries)
 
 # Add helloWorld application.
-add_executable(application_HelloWorld "${SRCROOT}/helloWorld.cpp")
-setup_executable_target(application_HelloWorld "${SRCROOT}")
-target_link_libraries(application_HelloWorld tudat_gravitation tudat_basic_astrodynamics ${Boost_LIBRARIES} )
+add_executable(app_SatellitePropagator "${SRCROOT}/singleSatellitePropagator.cpp")
+setup_executable_target(app_SatellitePropagator "${SRCROOT}")
+target_link_libraries(app_SatellitePropagator ${TUDAT_PROPAGATION_LIBRARIES} ${Boost_LIBRARIES} )
+
+add_library(SatellitePropagator SHARED "${SRCROOT}/singleSatellitePropagator.cpp")
+setup_library_target(SatellitePropagator "${SRCROOT}")
+target_compile_options(SatellitePropagator PRIVATE "-D__WITHOUT_MAIN")
+target_link_libraries(SatellitePropagator ${TUDAT_PROPAGATION_LIBRARIES} ${Boost_LIBRARIES} )
