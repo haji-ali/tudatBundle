@@ -9,7 +9,6 @@
  */
 #include <sstream>
 #include <Tudat/SimulationSetup/tudatSimulationHeader.h>
-#include "SatellitePropagatorExamples/applicationOutput.h"
 
 extern "C"
 unsigned int GetOrbit(double* init, unsigned int bodies,

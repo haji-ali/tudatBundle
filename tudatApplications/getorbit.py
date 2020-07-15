@@ -9,7 +9,7 @@ from collections import namedtuple
 from tqdm import trange, tqdm
 import matplotlib.pyplot as plt
 
-__lib__ = npct.load_library("../lib/libSingleSatellitePropagator.so",
+__lib__ = npct.load_library("../lib/libSatellitePropagator.so",
                             __file__)
 
 __arr_double__ = npct.ndpointer(dtype=np.double, flags='C_CONTIGUOUS')
@@ -173,7 +173,7 @@ def mlmc_l(data, L, M, M0):
         init2 = np.random.multivariate_normal(data.mean2, data.C2, size=M0)
         c = None
         for ell in range(0, L):
-            N = int(data.T/10) * 2**ell
+            N = 2**ell
             res1 = getOrbit(init1, data.T, N)
             res2 = getOrbit(init2, data.T, N)
             dist = linDist(res1[:, :, :3], res2[:, :, :3])  # Should be NxM
@@ -195,10 +195,10 @@ data = Data(mean1=data_dict["Primary"][0, :], C1=data_dict["Primary"][1:, :],
             mean2=data_dict["Secondary"][0,:], C2=data_dict["Secondary"][1:, :],
             T=280800+21600, radius=15)
 
-M = 1000
+M = 10000
 M0 = 100
 
-sums, totalM = mlmc_l(data, 2, 1000, 100)
+sums, totalM = mlmc_l(data, 20, M, M0)
 np.savez("mlmc_l.npz", sums=sums, M=totalM)
 
 # mlmc_l(data, 20, 10000, 100)

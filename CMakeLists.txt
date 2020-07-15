@@ -126,6 +126,7 @@ endif()
 #
 if(USE_SOFA)
   add_subdirectory( "${PROJECTROOT}/sofa/src")
+  set_property(TARGET sofa APPEND PROPERTY COMPILE_OPTIONS "-fPIC")
 endif()
 
 #
