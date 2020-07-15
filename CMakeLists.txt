@@ -92,6 +92,7 @@ include(add_boost)
 #
 if(USE_CSPICE)
   add_subdirectory( "${PROJECTROOT}/cspice/")
+  set_property(TARGET cspice APPEND PROPERTY COMPILE_OPTIONS "-fPIC")
   set_property(TARGET cspice APPEND PROPERTY COMPILE_OPTIONS "-Wno-implicit-int")
   set_property(TARGET cspice APPEND PROPERTY COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
   set_property(TARGET cspice APPEND PROPERTY COMPILE_OPTIONS "-Wno-pointer-to-int-cast")
@@ -117,6 +118,7 @@ endif()
 if(USE_NRLMSISE00)
   set(NRLMSISE00_WITH_TESTS OFF CACHE BOOL "Building of NRLMSISE00 tests.")
   add_subdirectory( "${PROJECTROOT}/nrlmsise-00/")
+  set_property(TARGET nrlmsise00 APPEND PROPERTY COMPILE_OPTIONS "-fPIC")
 endif()
 
 #
@@ -213,3 +215,4 @@ endif()
 
 
 add_subdirectory( "${PROJECTROOT}/tudatExampleApplications/templateApplication/TemplateApplication")
+add_subdirectory( "${PROJECTROOT}/tudatApplications/")
