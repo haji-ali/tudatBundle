@@ -7,7 +7,16 @@ import hau
 from collections import namedtuple
 
 from tqdm import trange, tqdm
+from multiprocessing import Pool
 import matplotlib.pyplot as plt
+
+parallel=True
+def pmap(fn, runs):
+    runs = [[len(runs), i] + r for i, r in enumerate(runs)]
+    if parallel:
+        with Pool(len(runs), initializer=tqdm.set_lock, initargs=(tqdm.get_lock(),)) as p:
+            return p.map(fn, runs)
+    return list(map(fn, runs))
 
 __lib__ = npct.load_library("../lib/libSatellitePropagator.so",
                             __file__)
@@ -185,9 +194,12 @@ def mlmc_l(data, L, M, M0):
                 sums[ell, 3] += np.sum((f-c)**2, axis=0)
                 
             c = f
-            
         totalM += M0
     return sums, totalM
+
+def _do_mlmc_l(args):
+    M,m,data,L,M0 = args
+    return mlmc_l(data, L, M0, M0)
 
 Data = namedtuple('Data', 'mean1 mean2 C1 C2 T radius')
 data_dict = {k:np.array(v) for k,v in hau.load_file("objects.txt").items()}
@@ -195,10 +207,9 @@ data = Data(mean1=data_dict["Primary"][0, :], C1=data_dict["Primary"][1:, :],
             mean2=data_dict["Secondary"][0,:], C2=data_dict["Secondary"][1:, :],
             T=280800+21600, radius=15)
 
-M = 10000
-M0 = 100
-
-sums, totalM = mlmc_l(data, 20, M, M0)
+M, M0, L = 10000, 100, 19
+result = pmap(_do_mlmc_l, [[data, L, M0] for i in range(int(np.ceil(M/M0)))])
+sums, totalM = np.sum(np.array(result), axis=0)
 np.savez("mlmc_l.npz", sums=sums, M=totalM)
 
 # mlmc_l(data, 20, 10000, 100)
