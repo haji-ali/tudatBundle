@@ -181,6 +181,8 @@ unsigned int GetOrbit(double* init, unsigned int bodies,
             if (output && count < total_count)
                 output[count] = res[i];
     }
+
+    spice_interface::clearSpiceKernels();
     return count;
 }
 
