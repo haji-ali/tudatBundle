@@ -15,7 +15,7 @@ def pmap(fn, runs):
     runs = [[len(runs), i] + r for i, r in enumerate(runs)]
     if parallel:
         with Pool() as p:
-            return list(tqdm.tqdm(p.imap(fn, runs), total=len(runs)))
+            return list(tqdm(p.imap(fn, runs), total=len(runs)))
     return list(map(fn, runs))
 
 __lib__ = npct.load_library("../lib/libSatellitePropagator.so",
@@ -33,23 +33,41 @@ __lib__.GetOrbit.argtypes = [__arr_double__, # init (size bodies x 6)
 ]
 
 
-def test(y0, T, N):
-    from scipy.integrate import odeint
-    m = 3.986e+14 #3.986004418e14
+def RK4_step(t, x, h, fnRHS):
+    k1 = fnRHS(t, x)
+    k2 = fnRHS(t, x+.5*h*k1)
+    k3 = fnRHS(t, x+.5*h*k2)
+    k4 = fnRHS(t, x+h*k3)
+    return x + h*(k1+2*k2+2*k3+k4)/6
+
+def RK4(x, nSteps, fnStep):
+    xi = [x]
+    t = [0]
+    for i in range(nSteps):
+        h, x = fnStep(t[-1], xi[-1])
+        xi.append(x)
+        t.append(t[-1]+h)
+    return t, xi
+
+def getOrbit_RK4(init, T, N):
+    m = 3.986004418e+14
+    
     # function that returns dy/dt
-    def model(y,t):
-        assert(len(y)%6 == 0 and len(y.shape) == 1)
-        y = y.reshape((-1, 6), order="C")
+    def model(t, y):
+        # assert(len(y)%6 == 0 and len(y.shape) == 1)
+        # y = y.reshape((-1, 6), order="C")
         dydt = np.zeros_like(y)
         dydt[:, 0:3] = y[:, 3:6]
         dydt[:, 3:6] = - m * y[:, :3] / np.sum(y[:, :3]**2, axis=1)[:,None]**(3./2.)
-        return dydt.ravel(order="C")
+        return dydt#.ravel(order="C")
 
     # time points
-    t = np.linspace(0,T, N)
-
+    h = T/N
+    t, steps = RK4(init,
+                   N,
+                   lambda t, x, h=h, mod=model: (h, RK4_step(t, x, h, mod)))
     # solve ODE
-    return odeint(model,y0.ravel(order="C"),t).reshape((N, -1, 6), order="C")
+    return np.array(steps)#.reshape((N, -1, 6), order="C")
     
 def getOrbit(init, T, N):
     # init size is bodies x 6
@@ -181,8 +199,8 @@ def mlmc_l(data, L, M0):
     c = None
     for ell in range(0, L):
         N = 2**ell
-        res1 = getOrbit(init1, data.T, N)
-        res2 = getOrbit(init2, data.T, N)
+        res1 = getOrbit_RK4(init1, data.T, N)
+        res2 = getOrbit_RK4(init2, data.T, N)
         dist = linDist(res1[:, :, :3], res2[:, :, :3])
         f = (np.sum(dist < data.radius, axis=0)>0).astype(np.float)
         sums[ell, 0] += np.sum(f, axis=0)
@@ -195,7 +213,7 @@ def mlmc_l(data, L, M0):
 
 def _do_mlmc_l(args):
     M,m,data,L,M0 = args
-    return mlmc_l(data, L, M0, M0)
+    return mlmc_l(data, L, M0)
 
 Data = namedtuple('Data', 'mean1 mean2 C1 C2 T radius')
 data_dict = {k:np.array(v) for k,v in hau.load_file("objects.txt").items()}
@@ -203,57 +221,58 @@ data = Data(mean1=data_dict["Primary"][0, :], C1=data_dict["Primary"][1:, :],
             mean2=data_dict["Secondary"][0,:], C2=data_dict["Secondary"][1:, :],
             T=280800+21600, radius=15)
 
-M, M0, L = 10000, 100, 19
-result = pmap(_do_mlmc_l, [[data, L, M0] for i in range(int(np.ceil(M/M0)))])
-sums, totalM = np.sum(np.array(result), axis=0)
-np.savez("mlmc_l.npz", sums=sums, M=totalM)
+if __name__ == "__main__":
+    M, M0, L = 10000, 100, 19
+    result = pmap(_do_mlmc_l, [[data, L, M0] for i in range(int(np.ceil(M/M0)))])
+    sums, totalM = np.sum(np.array(result, dtype=object), axis=0)
+    np.savez("mlmc_l.npz", sums=sums, M=totalM)
 
-# mlmc_l(data, 20, 10000, 100)
+    # mlmc_l(data, 20, 10000, 100)
 
-# res1 = test(mean1, T, N)[:, 0,:]
-# res2 = test(mean2, T, N)[:, 0,:]
-# t = np.linspace(0,T, N)
-# dist = shortestDist(res1[:, :3], res2[:, :3])
-# dist3 = linDist(res1[:, :3], res2[:, :3])
-# dist2 = np.sqrt(np.sum((res1[:, :3]-res2[:, :3])**2, axis=1))
-# plt.plot(t, dist)
-# plt.plot(t, dist2)
-# plt.plot(t, dist3)
+    # res1 = test(mean1, T, N)[:, 0,:]
+    # res2 = test(mean2, T, N)[:, 0,:]
+    # t = np.linspace(0,T, N)
+    # dist = shortestDist(res1[:, :3], res2[:, :3])
+    # dist3 = linDist(res1[:, :3], res2[:, :3])
+    # dist2 = np.sqrt(np.sum((res1[:, :3]-res2[:, :3])**2, axis=1))
+    # plt.plot(t, dist)
+    # plt.plot(t, dist2)
+    # plt.plot(t, dist3)
 
-# import matplotlib.pyplot as plt
-# from mpl_toolkits.mplot3d import Axes3D
-# fig = plt.figure()
-# xyz1 = res1[:2, :3]
-# xyz2 = res2[:2, :3]
-# ax = fig.add_subplot(111, projection='3d')
-# ax.plot(xyz1[:, 0], xyz1[:, 1], xyz1[:, 2])
-# ax.plot(xyz2[:, 0], xyz2[:, 1], xyz2[:, 2])
+    # import matplotlib.pyplot as plt
+    # from mpl_toolkits.mplot3d import Axes3D
+    # fig = plt.figure()
+    # xyz1 = res1[:2, :3]
+    # xyz2 = res2[:2, :3]
+    # ax = fig.add_subplot(111, projection='3d')
+    # ax.plot(xyz1[:, 0], xyz1[:, 1], xyz1[:, 2])
+    # ax.plot(xyz2[:, 0], xyz2[:, 1], xyz2[:, 2])
 
 
-# totalM = 0
-# prob = 0
-# for i in trange(0, M//100):
-#     init1 = np.random.multivariate_normal(mean1, C1, size=M0)
-#     init2 = np.random.multivariate_normal(mean2, C2, size=M0)
+    # totalM = 0
+    # prob = 0
+    # for i in trange(0, M//100):
+    #     init1 = np.random.multivariate_normal(mean1, C1, size=M0)
+    #     init2 = np.random.multivariate_normal(mean2, C2, size=M0)
 
-#     res1 = getOrbit(init1, T, N)
-#     res2 = getOrbit(init2, T, N)
-#     dist = linDist(res1[:, :, :3], res2[:, :, :3])
-#     prob += np.sum(np.cumsum(dist < radius, axis=0)>0, axis=1)
-#     totalM += M0
+    #     res1 = getOrbit(init1, T, N)
+    #     res2 = getOrbit(init2, T, N)
+    #     dist = linDist(res1[:, :, :3], res2[:, :, :3])
+    #     prob += np.sum(np.cumsum(dist < radius, axis=0)>0, axis=1)
+    #     totalM += M0
 
-# plt.plot(np.linspace(0, T, N+1), prob/totalM);
-# plt.show()
+    # plt.plot(np.linspace(0, T, N+1), prob/totalM);
+    # plt.show()
 
-# work = np.zeros(6)
-# for l in trange(len(work)):
-#     tStart = time.time()
-#     N = 10 * 2**l
+    # work = np.zeros(6)
+    # for l in trange(len(work)):
+    #     tStart = time.time()
+    #     N = 10 * 2**l
 
-#     res1 = getOrbit(init1, T, N)
-#     res2 = getOrbit(init2, T, N)
-#     dist = shortestDistance(res1[:, :, :3], res2[:, :, :3])  # Should be NxM
+    #     res1 = getOrbit(init1, T, N)
+    #     res2 = getOrbit(init2, T, N)
+    #     dist = shortestDistance(res1[:, :, :3], res2[:, :, :3])  # Should be NxM
 
-#     np.mean(np.cumsum(dist<15, axis=0)>0, axis=1)
+    #     np.mean(np.cumsum(dist<15, axis=0)>0, axis=1)
 
-#     work[l] = time.time()-tStart
+    #     work[l] = time.time()-tStart
