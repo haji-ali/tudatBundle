@@ -293,7 +293,7 @@ def mlmc_l_2(data, L, M0, adaptive_factor):
     c = None
     for ell in range(0, L):
         N_min = 64 * 2**ell
-        N_max = 64 * 2**np.maximum(L, ell+3)
+        N_max = 64 * 2**np.minimum(L, ell+3)
         max_h = data.T / N_min
         min_h = data.T / N_max
 
