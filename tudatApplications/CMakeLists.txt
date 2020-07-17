@@ -174,6 +174,7 @@ include(tudatLinkLibraries)
 # Add helloWorld application.
 add_executable(app_SatellitePropagator "${SRCROOT}/singleSatellitePropagator.cpp")
 setup_executable_target(app_SatellitePropagator "${SRCROOT}")
+target_compile_options(app_SatellitePropagator PRIVATE "-g")
 target_link_libraries(app_SatellitePropagator ${TUDAT_PROPAGATION_LIBRARIES} ${Boost_LIBRARIES} )
 
 add_library(SatellitePropagator SHARED "${SRCROOT}/singleSatellitePropagator.cpp")

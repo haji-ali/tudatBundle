@@ -22,14 +22,48 @@ __lib__ = npct.load_library("../lib/libSatellitePropagator.so",
                             __file__)
 
 __arr_double__ = npct.ndpointer(dtype=np.double, flags='C_CONTIGUOUS')
+__arr_uint32__ = npct.ndpointer(dtype=np.uint32, flags='C_CONTIGUOUS')
+
+
+class PerturbedSettings(ct.Structure):
+    _fields_ = [("mass", ct.c_double),
+                ("referenceArea", ct.c_double),
+                ("aerodynamicCoefficient", ct.c_double),
+                ("referenceAreaRadiation", ct.c_double),
+                ("radiationPressureCoefficient", ct.c_double)]
+
+    def __init__(self, mass=4,
+                 referenceArea=4,
+                 aerodynamicCoefficient=1.2,
+                 referenceAreaRadiation=4,
+                 radiationPressureCoefficient=1.2):
+        self.mass = mass
+        self.referenceArea = referenceArea
+        self.aerodynamicCoefficient = aerodynamicCoefficient
+        self.referenceAreaRadiation = referenceAreaRadiation
+        self.radiationPressureCoefficient = radiationPressureCoefficient
 
 __lib__.GetOrbit.restype = ct.c_uint32
 __lib__.GetOrbit.argtypes = [__arr_double__, # init (size bodies x 6)
                              ct.c_uint32,  # bodies
+                             ct.POINTER(PerturbedSettings),
                              ct.c_double, # simulationEndEpoch
                              ct.c_uint32,  # N
                              __arr_double__, # output (N x bodies x 6)
                              ct.c_bool
+]
+
+__lib__.GetMinDist.restype = ct.c_uint32
+__lib__.GetMinDist.argtypes = [__arr_double__, # init1 (size bodies x 6)
+                               __arr_double__, # init2 (size bodies x 6)
+                               ct.c_uint32,  # bodies
+                               ct.c_double, # simulationEndEpoch
+                               ct.c_double,  # max_h
+                               ct.c_double,  # min_h
+                               ct.c_double,  # radius2
+                               ct.c_double,  # adaptive_factor
+                               __arr_double__, # output (bodies)
+                               __arr_uint32__, # output_N (bodies)
 ]
 
 
@@ -40,16 +74,18 @@ def RK4_step(t, x, h, fnRHS):
     k4 = fnRHS(t, x+h*k3)
     return x + h*(k1+2*k2+2*k3+k4)/6
 
-def RK4(x, nSteps, fnStep):
+def RK4(x, fnStep):
     xi = [x]
     t = [0]
-    for i in range(nSteps):
+    while True:
         h, x = fnStep(t[-1], xi[-1])
+        if h <= 0:
+            break
         xi.append(x)
         t.append(t[-1]+h)
     return t, xi
 
-def getOrbit_RK4(init, T, N):
+def getOrbit_RK4(init, T, N, radius=0, h_min=None):
     m = 3.986004418e+14
     
     # function that returns dy/dt
@@ -57,33 +93,71 @@ def getOrbit_RK4(init, T, N):
         # assert(len(y)%6 == 0 and len(y.shape) == 1)
         # y = y.reshape((-1, 6), order="C")
         dydt = np.zeros_like(y)
-        dydt[:, 0:3] = y[:, 3:6]
-        dydt[:, 3:6] = - m * y[:, :3] / np.sum(y[:, :3]**2, axis=1)[:,None]**(3./2.)
+        dydt[..., 0:3] = y[..., 3:6]
+        dydt[..., 3:6] = - m * y[..., :3] / np.sum(y[..., :3]**2, axis=-1)[...,None]**(3./2.)
         return dydt#.ravel(order="C")
 
+    h0 = T/N
+    if h_min is None:
+        step = lambda t, x, h=h0, mod=model: (min(T-t, h), RK4_step(t, x, h, mod))
+    else:
+        def step(t, y):
+            h = h0
+            old_dist = np.maximum(np.sum((y[0,...,0:3] - y[1,...,0:3])**2, axis=-1), radius)
+
+            yn = y[..., 0:3] + h_min*y[..., 3:6]
+            min_dist = np.sum((yn[0,...,0:3] - yn[1,...,0:3])**2, axis=-1)
+            
+            if np.all(min_dist <= radius*10):    # Getting closer
+                while h > h_min:
+                    yn = y[..., 0:3] + h*y[..., 3:6]
+                    new_dist = np.sum((yn[0,...,0:3] - yn[1,...,0:3])**2, axis=-1)
+                    if np.all(new_dist <= min_dist):
+                        break
+                    h /= 2
+                    
+            h = min(T-t, h)
+            return h, RK4_step(t, y, h, model)
+
     # time points
-    h = T/N
-    t, steps = RK4(init,
-                   N,
-                   lambda t, x, h=h, mod=model: (h, RK4_step(t, x, h, mod)))
+    t, steps = RK4(init, step)
     # solve ODE
-    return np.array(steps)#.reshape((N, -1, 6), order="C")
+    return np.array(t), np.array(steps)
     
-def getOrbit(init, T, N):
+def getOrbit(init, T, N, perturbed_settings=None):
     # init size is bodies x 6
     assert(len(init.shape) in (1,2) and init.shape[-1] == 6)
     N = int(N)
     bodies = 1 if len(init.shape)==1 else init.shape[0]
     output = np.empty(int((N+1)*np.prod(init.shape)), dtype=np.double)
+
     count = __lib__.GetOrbit(
         init.ravel(order="C"),
-        ct.c_uint32(1 if len(init.shape)==1 else init.shape[0]),
+        ct.c_uint32(bodies),
+        ct.byref(perturbed_settings) if perturbed_settings is not None else ct.POINTER(PerturbedSettings)(),
         ct.c_double(T),
         ct.c_uint32(N),
         output, False)
+    
     if count != len(output):   # Otherwise something is weird
-        raise Exception("Expected {}, got {}".format(len(output), count))
+        raise Exception("N={}, Expected {}, got {}".format(N, len(output), count))
     return output.reshape((N+1,) + init.shape, order="C")
+
+def getMinDist(init1, init2, T, max_h, min_h, radius2, adaptive_factor):
+    # init size is bodies x 6
+    assert(len(init1.shape) in (1,2) and init1.shape[-1] == 6)
+    assert(init2.shape == init1.shape)
+
+    bodies = 1 if len(init1.shape)==1 else init1.shape[0]
+    output = np.empty(bodies, dtype=np.double)
+    output_N = np.empty(bodies, dtype=np.uint32)
+    __lib__.GetMinDist(init1.ravel(order="C"), init2.ravel(order="C"), ct.c_uint32(bodies),
+                       ct.c_double(T), ct.c_double(max_h), ct.c_double(min_h),
+                       ct.c_double(radius2),
+                       ct.c_double(adaptive_factor),
+                       output, output_N)
+    return output, output_N
+    
 
 def gridDist(S1, S2):
     """Returns the distance between the time series S1 and S2.
@@ -193,14 +267,14 @@ def shortestDist(S1, S2):
 
 def mlmc_l(data, L, M0):
     prob = 0
-    sums = np.zeros((L, 4))
+    sums = np.zeros((L, 5))
     init1 = np.random.multivariate_normal(data.mean1, data.C1, size=M0)
     init2 = np.random.multivariate_normal(data.mean2, data.C2, size=M0)
     c = None
     for ell in range(0, L):
-        N = 2**ell
-        res1 = getOrbit_RK4(init1, data.T, N)
-        res2 = getOrbit_RK4(init2, data.T, N)
+        N = 64 * 2**ell
+        _, res1 = getOrbit_RK4(init1, data.T, N)
+        _, res2 = getOrbit_RK4(init2, data.T, N)
         dist = linDist(res1[:, :, :3], res2[:, :, :3])
         f = (np.sum(dist < data.radius, axis=0)>0).astype(np.float)
         sums[ell, 0] += np.sum(f, axis=0)
@@ -211,9 +285,33 @@ def mlmc_l(data, L, M0):
         c = f
     return sums, M0
 
+def mlmc_l_2(data, L, M0, adaptive_factor):
+    prob = 0
+    sums = np.zeros((L, 6))
+    init1 = np.random.multivariate_normal(data.mean1, data.C1, size=M0)
+    init2 = np.random.multivariate_normal(data.mean2, data.C2, size=M0)
+    c = None
+    for ell in range(0, L):
+        N_min = 64 * 2**ell
+        N_max = 64 * 2**np.maximum(L, ell+3)
+        max_h = data.T / N_min
+        min_h = data.T / N_max
+
+        D, N = getMinDist(init1, init2, data.T, max_h, min_h,
+                          data.radius**2, adaptive_factor)
+        f = (D < data.radius**2).astype(np.float)
+        sums[ell, 0] += np.sum(N)
+        sums[ell, 1] += np.sum(f, axis=0)
+        sums[ell, 2] += np.sum(f**2, axis=0)
+        if c is not None:
+            sums[ell, 3] += np.sum(f-c, axis=0)
+            sums[ell, 4] += np.sum((f-c)**2, axis=0)
+        c = f
+    return sums, M0
+
 def _do_mlmc_l(args):
-    M,m,data,L,M0 = args
-    return mlmc_l(data, L, M0)
+    M,m,data,L,M0,adaptive_factor = args
+    return mlmc_l_2(data, L, M0, adaptive_factor)
 
 Data = namedtuple('Data', 'mean1 mean2 C1 C2 T radius')
 data_dict = {k:np.array(v) for k,v in hau.load_file("objects.txt").items()}
@@ -222,23 +320,25 @@ data = Data(mean1=data_dict["Primary"][0, :], C1=data_dict["Primary"][1:, :],
             T=280800+21600, radius=15)
 
 if __name__ == "__main__":
-    M, M0, L = 10000, 100, 19
-    result = pmap(_do_mlmc_l, [[data, L, M0] for i in range(int(np.ceil(M/M0)))])
+    M, M0, L = 1000000, 100, 18
+    result = pmap(_do_mlmc_l, [[data, L, M0, 0] for i in range(int(np.ceil(M/M0)))])
     sums, totalM = np.sum(np.array(result, dtype=object), axis=0)
-    np.savez("mlmc_l.npz", sums=sums, M=totalM)
+    np.savez("mlmc_l_nonadaptive.npz", sums=sums, M=totalM)
+
+    result = pmap(_do_mlmc_l, [[data, L, M0, 100] for i in range(int(np.ceil(M/M0)))])
+    sums, totalM = np.sum(np.array(result, dtype=object), axis=0)
+    np.savez("mlmc_l_adaptive.npz", sums=sums, M=totalM)
 
     # mlmc_l(data, 20, 10000, 100)
-
-    # res1 = test(mean1, T, N)[:, 0,:]
-    # res2 = test(mean2, T, N)[:, 0,:]
-    # t = np.linspace(0,T, N)
-    # dist = shortestDist(res1[:, :3], res2[:, :3])
-    # dist3 = linDist(res1[:, :3], res2[:, :3])
-    # dist2 = np.sqrt(np.sum((res1[:, :3]-res2[:, :3])**2, axis=1))
-    # plt.plot(t, dist)
-    # plt.plot(t, dist2)
-    # plt.plot(t, dist3)
-
+    ps = PerturbedSettings()
+    for i in range(6, 14):
+        N = 2**i
+        res1 = getOrbit(data.mean1, data.T, N, ps)[:,:]
+        res2 = getOrbit(data.mean2, data.T, N, ps)[:,:]
+        t = np.linspace(0, data.T, res1.shape[0])
+        dist = linDist(res1[:, :3], res2[:, :3])
+        plt.plot(t, dist)
+    
     # import matplotlib.pyplot as plt
     # from mpl_toolkits.mplot3d import Axes3D
     # fig = plt.figure()
@@ -247,7 +347,6 @@ if __name__ == "__main__":
     # ax = fig.add_subplot(111, projection='3d')
     # ax.plot(xyz1[:, 0], xyz1[:, 1], xyz1[:, 2])
     # ax.plot(xyz2[:, 0], xyz2[:, 1], xyz2[:, 2])
-
 
     # totalM = 0
     # prob = 0
@@ -276,3 +375,17 @@ if __name__ == "__main__":
     #     np.mean(np.cumsum(dist<15, axis=0)>0, axis=1)
 
     #     work[l] = time.time()-tStart
+    #
+    #
+    # hau.load("getorbit", "*")
+    # M0 = 100
+    # init1 = np.random.multivariate_normal(data.mean1, data.C1, size=M0)
+    # init2 = np.random.multivariate_normal(data.mean2, data.C2, size=M0)
+
+    # for i in range(1, 10):
+    #     N_min = 64 * 2**i
+    #     N_max = 64 * 2**10
+    #     max_h = data.T / N_min
+    #     min_h = data.T / N_max
+    #     D, N = getMinDist(init1, init2, data.T, max_h, min_h, data.radius**2, 100)
+    #     print(N_min, np.mean(N), N_max)

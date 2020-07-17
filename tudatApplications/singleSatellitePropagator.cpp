@@ -8,61 +8,144 @@
  *    http://tudat.tudelft.nl/LICENSE.
  */
 #include <sstream>
+#include <limits>
 #include <Tudat/SimulationSetup/tudatSimulationHeader.h>
+
+struct PerturbedSettings {
+    double mass;
+    double referenceArea;
+    double aerodynamicCoefficient;
+    double referenceAreaRadiation;
+    double radiationPressureCoefficient;
+
+};
 
 extern "C"
 unsigned int GetOrbit(double* init, unsigned int bodies,
+                      PerturbedSettings *pSettings,
                       double simulationEndEpoch, unsigned int N,
-                      double* output, bool debug) {
-    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///////////////////////            USING STATEMENTS              //////////////////////////////////////////////////////
-    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+                      double* output, bool debug)
+{
     using namespace tudat;
     using namespace tudat::simulation_setup;
     using namespace tudat::propagators;
     using namespace tudat::numerical_integrators;
     using namespace tudat::orbital_element_conversions;
     using namespace tudat::basic_mathematics;
-    using namespace tudat::unit_conversions;
+    using namespace tudat::gravitation;
+    using namespace tudat::numerical_integrators;
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     ///////////////////////     CREATE ENVIRONMENT AND VEHICLE       //////////////////////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
     // Load Spice kernels.
     spice_interface::loadStandardSpiceKernels( );
 
-    // Create body objects.
+    // Set simulation time settings.
+    const double simulationStartEpoch = 0.0;
+
+    // Define body settings for simulation.
     std::vector< std::string > bodiesToCreate;
     bodiesToCreate.push_back( "Earth" );
-    std::map< std::string, std::shared_ptr< BodySettings > > bodySettings =
-            getDefaultBodySettings( bodiesToCreate );
-    bodySettings[ "Earth" ]->ephemerisSettings = std::make_shared< ConstantEphemerisSettings >(
-                Eigen::Vector6d::Zero( ) );
 
-    // Create Earth object
+    if (pSettings) {
+        bodiesToCreate.push_back( "Sun" );
+        bodiesToCreate.push_back( "Moon" );
+        bodiesToCreate.push_back( "Mars" );
+        bodiesToCreate.push_back( "Venus" );
+    }
+
+    // Create body objects.
+    std::map< std::string, std::shared_ptr< BodySettings > > bodySettings;
+
+    if (pSettings){
+        bodySettings = getDefaultBodySettings( bodiesToCreate, simulationStartEpoch - 300.0, simulationEndEpoch + 300.0 );
+        for( unsigned int i = 0; i < bodiesToCreate.size( ); i++ )
+            {
+                bodySettings[ bodiesToCreate.at( i ) ]->ephemerisSettings->resetFrameOrientation( "J2000" );
+                bodySettings[ bodiesToCreate.at( i ) ]->rotationModelSettings->resetOriginalFrame( "J2000" );
+            }
+    }
+    else{
+        bodySettings = getDefaultBodySettings( bodiesToCreate );
+        bodySettings[ "Earth" ]->ephemerisSettings = std::make_shared< ConstantEphemerisSettings >(
+            Eigen::Vector6d::Zero( ) );
+    }
+
     NamedBodyMap bodyMap = createBodies( bodySettings );
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    ///////////////////////             CREATE VEHICLE            /////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Define propagator settings variables.
+    SelectedAccelerationMap accelerationMap;
     std::vector< std::string > bodiesToPropagate;
     std::vector< std::string > centralBodies;
-    SelectedAccelerationMap accelerationMap;
+
     // Define propagation settings.
     std::map< std::string, std::vector< std::shared_ptr< AccelerationSettings > > > accelerationsOfAsterix;
-    accelerationsOfAsterix[ "Earth" ].push_back( std::make_shared< AccelerationSettings >(
-                                                     basic_astrodynamics::central_gravity ) );
+
+    if (pSettings){
+        accelerationsOfAsterix[ "Earth" ].push_back( std::make_shared< SphericalHarmonicAccelerationSettings >( 5, 5 ) );
+
+        accelerationsOfAsterix[ "Sun" ].push_back( std::make_shared< AccelerationSettings >(
+                                                       basic_astrodynamics::central_gravity ) );
+        accelerationsOfAsterix[ "Moon" ].push_back( std::make_shared< AccelerationSettings >(
+                                                        basic_astrodynamics::central_gravity ) );
+        accelerationsOfAsterix[ "Mars" ].push_back( std::make_shared< AccelerationSettings >(
+                                                        basic_astrodynamics::central_gravity ) );
+        accelerationsOfAsterix[ "Venus" ].push_back( std::make_shared< AccelerationSettings >(
+                                                         basic_astrodynamics::central_gravity ) );
+
+        accelerationsOfAsterix[ "Sun" ].push_back( std::make_shared< AccelerationSettings >(
+                                                       basic_astrodynamics::cannon_ball_radiation_pressure ) );
+
+        accelerationsOfAsterix[ "Earth" ].push_back( std::make_shared< AccelerationSettings >(
+                                                         basic_astrodynamics::aerodynamic ) );
+    }
+    else{
+        accelerationsOfAsterix[ "Earth" ].push_back( std::make_shared< AccelerationSettings >(
+                                                         basic_astrodynamics::central_gravity ) );
+    }
 
     Eigen::VectorXd systemInitialState(6 * bodies);
-
-    // Create spacecraft object.
     for (unsigned int i=0;i<bodies;i++){
-        centralBodies.push_back( "Earth" );
-
         std::stringstream ss;
         ss << "Body" << i << std::endl;
-        bodyMap[ ss.str() ] = std::make_shared< simulation_setup::Body >( );
-        bodiesToPropagate.push_back(ss.str());
-        accelerationMap[ ss.str() ] = accelerationsOfAsterix;
+        const std::string& name= ss.str();
+
+        bodyMap[ name ] = std::make_shared< simulation_setup::Body >( );
+        if (pSettings){
+            // Create spacecraft object.
+            bodyMap[ name ]->setConstantBodyMass( pSettings->mass );
+
+            // Create aerodynamic coefficient interface settings.
+            std::shared_ptr< AerodynamicCoefficientSettings > aerodynamicCoefficientSettings =
+                std::make_shared< ConstantAerodynamicCoefficientSettings >(
+                    pSettings->referenceArea, pSettings->aerodynamicCoefficient * Eigen::Vector3d::UnitX( ), 1, 1 );
+
+            // Create and set aerodynamic coefficients object
+            bodyMap[ name ]->setAerodynamicCoefficientInterface(
+                createAerodynamicCoefficientInterface( aerodynamicCoefficientSettings, name ) );
+
+            // Create radiation pressure settings
+            std::vector< std::string > occultingBodies;
+            occultingBodies.push_back( "Earth" );
+            std::shared_ptr< RadiationPressureInterfaceSettings > asterixRadiationPressureSettings =
+                std::make_shared< CannonBallRadiationPressureInterfaceSettings >(
+                    "Sun", pSettings->referenceAreaRadiation,
+                    pSettings->radiationPressureCoefficient, occultingBodies );
+
+            // Create and set radiation pressure settings
+            bodyMap[ name ]->setRadiationPressureInterface(
+                "Sun", createRadiationPressureInterface(
+                    asterixRadiationPressureSettings, name, bodyMap ) );
+        }
+        
+        accelerationMap[ name ] = accelerationsOfAsterix;
+        bodiesToPropagate.push_back( name );
+        centralBodies.push_back( "Earth" );
 
         int j = 6*i;
         systemInitialState(j+xCartesianPositionIndex) = init[j];
@@ -72,68 +155,36 @@ unsigned int GetOrbit(double* init, unsigned int bodies,
         systemInitialState(j+xCartesianVelocityIndex) = init[j+3];
         systemInitialState(j+yCartesianVelocityIndex) = init[j+4];
         systemInitialState(j+zCartesianVelocityIndex) = init[j+5];
-        
     }
 
     // Finalize body creation.
-    setGlobalFrameBodyEphemerides( bodyMap, "SSB", "ECLIPJ2000" );
+    setGlobalFrameBodyEphemerides( bodyMap, "SSB", pSettings ? "J2000" : "ECLIPJ2000");
 
-    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///////////////////////            CREATE ACCELERATIONS          //////////////////////////////////////////////////////
-    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-    // Create acceleration models and propagation settings.
     basic_astrodynamics::AccelerationMap accelerationModelMap = createAccelerationModelsMap(
-                bodyMap, accelerationMap, bodiesToPropagate, centralBodies );
+        bodyMap, accelerationMap, bodiesToPropagate, centralBodies );
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     ///////////////////////             CREATE PROPAGATION SETTINGS            ////////////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    // Set initial conditions for the Asterix satellite that will be propagated in this simulation.
-    // The initial conditions are given in Keplerian elements and later on converted to Cartesian
-    // elements.
-
-    // // Set Keplerian elements for Asterix.
-    // Eigen::Vector6d asterixInitialStateInKeplerianElements;
-    // asterixInitialStateInKeplerianElements( semiMajorAxisIndex ) = 7500.0E3;
-    // asterixInitialStateInKeplerianElements( eccentricityIndex ) = 0.1;
-    // asterixInitialStateInKeplerianElements( inclinationIndex ) = convertDegreesToRadians( 85.3 );
-    // asterixInitialStateInKeplerianElements( argumentOfPeriapsisIndex ) =
-    //         convertDegreesToRadians( 235.7 );
-    // asterixInitialStateInKeplerianElements( longitudeOfAscendingNodeIndex ) =
-    //         convertDegreesToRadians( 23.4 );
-    // asterixInitialStateInKeplerianElements( trueAnomalyIndex ) = convertDegreesToRadians( 139.87 );
-
-    // // Convert Asterix state from Keplerian elements to Cartesian elements.
-    // double earthGravitationalParameter = bodyMap.at( "Earth" )->getGravityFieldModel( )->getGravitationalParameter( );
-    // Eigen::VectorXd systemInitialState = convertKeplerianToCartesianElements(
-    //             asterixInitialStateInKeplerianElements,
-    //             earthGravitationalParameter );
-    //
-    // std::cout << "Earth Gravitational parameter: " << earthGravitationalParameter << std::endl;
-
-
-    // Create propagator settings.
     std::shared_ptr< TranslationalStatePropagatorSettings< double > > propagatorSettings =
-            std::make_shared< TranslationalStatePropagatorSettings< double > >
-            ( centralBodies, accelerationModelMap, bodiesToPropagate, systemInitialState, simulationEndEpoch );
+        std::make_shared< TranslationalStatePropagatorSettings< double > >
+        ( centralBodies, accelerationModelMap, bodiesToPropagate, systemInitialState, simulationEndEpoch );
 
-    // Create numerical integrator settings.
-    double simulationStartEpoch = 0.0;
     const double fixedStepSize = simulationEndEpoch / N;
     std::shared_ptr< IntegratorSettings< > > integratorSettings =
-            std::make_shared< IntegratorSettings< > >
-            ( rungeKutta4, simulationStartEpoch, fixedStepSize );
+        std::make_shared< IntegratorSettings< > >
+        ( rungeKutta4, 0.0, fixedStepSize );
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     ///////////////////////             PROPAGATE ORBIT            ////////////////////////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
     // Create simulation object and propagate dynamics.
     SingleArcDynamicsSimulator< > dynamicsSimulator( bodyMap, integratorSettings, propagatorSettings );
     std::map< double, Eigen::VectorXd > integrationResult = dynamicsSimulator.getEquationsOfMotionNumericalSolution( );
+
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     ///////////////////////        PROVIDE OUTPUT TO CONSOLE AND FILES           //////////////////////////////////////////
@@ -159,20 +210,7 @@ unsigned int GetOrbit(double* init, unsigned int bodies,
             "And the velocity vector of Asterix is [km/s]:" << std::endl <<
             finalIntegratedState.segment( 3, 3 ) / 1E3 << std::endl;
     }
-    // std::string outputSubFolder = "UnperturbedSatelliteExample/";
 
-    // // Write satellite propagation history to file.
-    // input_output::writeDataMapToTextFile( integrationResult,
-    //                                       "singleSatellitePropagationHistory.dat",
-    //                                       tudat_applications::getOutputPath( ) + outputSubFolder,
-    //                                       "",
-    //                                       std::numeric_limits< double >::digits10,
-    //                                       std::numeric_limits< double >::digits10,
-    //                                       "," );
-
-    // Final statement.
-    // The exit code EXIT_SUCCESS indicates that the program was successfully executed.
-    
     unsigned int count = 0;
     const unsigned int total_count = bodies*(N+1)*6;
     for (auto itr=integrationResult.begin(); itr != integrationResult.end();++itr){
@@ -183,7 +221,120 @@ unsigned int GetOrbit(double* init, unsigned int bodies,
     }
 
     spice_interface::clearSpiceKernels();
+
     return count;
+}
+
+template <typename T>
+std::vector<T> operator+(const std::vector<T>& a, const std::vector<T>& b){
+
+    assert(a.size() == b.size());
+    std::vector<T> result(a.size());
+    std::transform(a.begin(), a.end(), b.begin(),
+                   result.begin(), std::plus<T>());
+    return result;
+}
+template <typename T>
+std::vector<T> operator*(double d, const std::vector<T>& a){
+    std::vector<T> result(a.size());
+    std::transform(a.begin(), a.end(), result.begin(),
+                   [d](T x) { return x*d; });
+    return result;
+}
+
+double MinDist_RK4(std::vector<double> x,
+                   double T,
+                   double max_h,
+                   double min_h,
+                   double radius2,
+                   double adaptive_factor,
+                   unsigned int& N){
+    // TOOD:
+    // 1. DONE fnRHS
+    // 2. DONE CalcMinDist
+    // 3. DONE Operators
+    // 4. Complicate distance function?
+    
+    assert(x.size() == 12);
+    const double m = 3.986004418e+14;
+    auto fnRHS = [m](const std::vector<double>& x) {
+                     std::vector<double> y(x.size());
+                     for (int i=0;i<12;i+=6){
+                         double norm = 0;
+                         for (int j=i;j<i+3;j++)
+                             norm += x[j]*x[j];
+                         norm = std::pow(norm, 3./2.);
+                         for (int j=i;j<i+3;j++){
+                             y[j] = x[j+3];
+                             y[j+3] = -m * x[j] / norm;
+                         }
+                     }
+                     return y;
+                 };
+    
+    auto fnDist2 = [m](const std::vector<double>& x) {
+                      double norm = 0;
+                      for (int j=0;j<3;j++){
+                          double d = x[j] - x[6+j];
+                          norm += d*d;
+                      }
+                      return norm;
+                  };
+
+    double min_dist = std::numeric_limits<double>::infinity();
+    double t=0;
+    std::vector<double> k[4];
+    N = 0;
+    while (t<T && min_dist > radius2){
+        // Figure out step size
+        double h = max_h;
+        if (min_h < max_h && adaptive_factor > 0){
+            double next_dist2 = fnDist2(x + min_h * x);
+            if (next_dist2 < adaptive_factor * radius2){
+                while (h > min_h){
+                    double try_dist = fnDist2(x + h * x);
+                    if (try_dist <= next_dist2)
+                        break;
+                    h /= 2.;
+                }
+            }
+        }
+        h = std::min(h, T-t);
+
+        // Advance with RK_4
+        k[0] = fnRHS(x);
+        k[1] = fnRHS(x + 0.5 * h * k[0]);
+        k[2] = fnRHS(x + 0.5 * h * k[1]);
+        k[3] = fnRHS(x +       h * k[2]);
+        x = x + (h/6.) * (k[0] + 2.*k[1] + 2.*k[2] + k[3]);
+        t += h;
+        min_dist = std::min(fnDist2(x), min_dist);
+        
+        N++;
+    }
+    return min_dist;
+}
+
+extern "C"
+void GetMinDist(double* init1, // Size * bodies * h
+                double* init2, // Size * bodies * h
+                unsigned int bodies,
+                double simulationEndEpoch,
+                double max_h, double min_h,
+                double radius2,
+                double adaptive_factor,
+                double* distances, // bodies
+                unsigned int *N
+    )
+{
+    for (unsigned int i=0;i<bodies;i++){
+        std::vector<double> x (init1+6*i, init1+6*(i+1));
+        x.insert(x.end(), init2+6*i, init2+6*(i+1));
+
+        distances[i] =
+            MinDist_RK4(x, simulationEndEpoch,
+                        max_h, min_h, radius2, adaptive_factor, N[i]);
+    }
 }
 
 #ifndef __WITHOUT_MAIN
@@ -192,8 +343,20 @@ int main( )
 {
     double init[] = {-33552459.274056, -23728303.048015, 0.0,
                      -1828.997179397, 2534.1074695609, 0.0};
+
+    std::cout << "----------- Unperturbed" << std::endl;
     GetOrbit(init,
              1,
+             NULL,
+             280800,
+             2808,
+             NULL, true);
+
+    PerturbedSettings p = {4,4,1.2,4,1.2};
+    std::cout << "----------- perturbed" << std::endl;
+    GetOrbit(init,
+             1,
+             &p,
              280800,
              2808,
              NULL, true);
